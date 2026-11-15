@@ -1,0 +1,406 @@
+/**
+ * 搭桥 —— 样式
+ */
+
+.board-svg .hs-board-bg {
+  fill: url(#hsBoardFill);
+  stroke: #d8d0c1;
+  stroke-width: 1.1;
+  filter: drop-shadow(0 8px 18px rgba(70, 55, 25, 0.08));
+}
+
+.board-svg .hs-board-dots {
+  pointer-events: none;
+}
+
+.board-svg .hs-island-shadow {
+  fill: rgba(60, 50, 30, 0.1);
+  pointer-events: none;
+}
+
+.board-svg .hs-island {
+  fill: url(#hsIslandFill);
+  stroke: #4d5b60;
+  stroke-width: 1.8;
+  pointer-events: none;
+  transition: fill 0.2s ease, stroke 0.2s ease;
+}
+
+.board-svg .hs-island.satisfied {
+  fill: #e7e1d4;
+  stroke: #b9b1a1;
+}
+
+.board-svg .hs-island.bad {
+  fill: #f8e9e5;
+  stroke: var(--error);
+  stroke-width: 2.6;
+}
+
+.board-svg .hs-number {
+  fill: #33424a;
+  font-family: var(--mono);
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+  user-select: none;
+  transition: fill 0.2s ease;
+}
+
+.board-svg .hs-number.satisfied {
+  fill: #8f897b;
+}
+
+.board-svg .hs-number.bad {
+  fill: var(--error);
+}
+
+.board-svg .hs-bridge-halo {
+  fill: none;
+  stroke: rgba(79, 136, 166, 0.14);
+  stroke-width: 7;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.board-svg .hs-bridge {
+  fill: none;
+  stroke: #4f88a6;
+  stroke-width: 3;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+/* —— 候选桥命中区与悬停提示 —— */
+.board-svg .hs-edge-hit {
+  fill: none;
+  stroke: transparent;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.board-svg .hs-hint {
+  pointer-events: none;
+}
+
+.board-svg .hs-hint-empty {
+  fill: none;
+  stroke: #4f88a6;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-dasharray: 5 8;
+  opacity: 0;
+}
+
+.board-svg .hs-hint-glow {
+  fill: none;
+  stroke: #8ae5c7;
+  stroke-width: 7;
+  stroke-linecap: round;
+  opacity: 0;
+  filter: drop-shadow(0 0 5px rgba(86, 216, 178, 0.85));
+}
+
+.board-svg .hs-hint-double {
+  opacity: 0;
+}
+
+.board-svg .hs-hint-double line {
+  stroke: var(--error);
+  stroke-width: 3;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(194, 59, 46, 0.55));
+}
+
+@keyframes hsEdgeBreathe {
+  0%,
+  100% {
+    opacity: 0.16;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    opacity: 0.72;
+    stroke-dashoffset: -13;
+  }
+}
+
+@keyframes hsGlowBreathe {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@keyframes hsCrossFloat {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: translateY(2px) scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2.5px) scale(1.08);
+  }
+}
+
+.board-svg .hs-edge[data-count='0']:hover .hs-hint-empty {
+  animation: hsEdgeBreathe 1.6s ease-in-out infinite;
+}
+
+.board-svg .hs-edge[data-count='1']:hover .hs-hint-glow {
+  animation: hsGlowBreathe 1.35s ease-in-out infinite;
+}
+
+.board-svg .hs-edge[data-count='2']:hover .hs-hint-double {
+  animation: hsCrossFloat 1.5s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   从图片导入
+   ════════════════════════════════════════════════════════════════ */
+
+.import-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 28px 16px;
+  overflow: auto;
+  background: rgba(28, 27, 24, 0.45);
+}
+
+.import-modal[hidden] {
+  display: none;
+}
+
+.import-dialog {
+  width: min(820px, 100%);
+  padding: 18px 20px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 50px rgba(28, 27, 24, 0.25);
+}
+
+.import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.import-head h2 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.import-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.import-row input[type='file'] {
+  max-width: 240px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.import-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.import-name input {
+  width: 190px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.import-hint {
+  margin-bottom: 10px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.import-hint kbd {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 0 5px;
+  background: #fff;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.import-stage {
+  position: relative;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.import-stage[hidden] {
+  display: none;
+}
+
+.import-stage canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.import-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.import-ring {
+  fill: rgba(31, 111, 92, 0.1);
+  stroke: var(--loop);
+  stroke-width: 2;
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.import-ring:hover {
+  fill: rgba(31, 111, 92, 0.2);
+}
+
+.import-ring.selected {
+  fill: rgba(196, 92, 38, 0.16);
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.import-badge-bg {
+  fill: var(--loop);
+  pointer-events: none;
+}
+
+.import-badge {
+  fill: #fff;
+  font-family: var(--mono);
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.import-keypad {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.import-keypad button {
+  min-width: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font: 600 13px/1 var(--mono);
+  cursor: pointer;
+}
+
+.import-keypad button:hover {
+  border-color: var(--loop);
+  color: var(--loop);
+}
+
+.import-info {
+  margin-bottom: 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.import-msg {
+  min-height: 1.2em;
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.import-msg.ok {
+  color: var(--ok);
+}
+
+.import-msg.bad {
+  color: var(--error);
+}
+
+/* —— 回放提示：把候选边的上下限画在棋盘上 ——
+   至少 1 座 = 一条实线 + 一条虚线；至多 1 座 = 一条虚线；未定 = 极淡点线 */
+.board-svg .hs-ghost {
+  pointer-events: none;
+}
+
+.board-svg .hs-ghost-line {
+  fill: none;
+  stroke: #c45c26;
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
+.board-svg .hs-ghost-dash {
+  stroke-dasharray: 6 7;
+  opacity: 0.5;
+}
+
+.board-svg .hs-ghost-unknown {
+  stroke-width: 2.4;
+  stroke-dasharray: 2 10;
+  opacity: 0.28;
+}
+
+.board-svg .hs-island-focus {
+  fill: none;
+  stroke: #c45c26;
+  stroke-width: 2;
+  stroke-dasharray: 4 6;
+  pointer-events: none;
+  animation: hsFocusPulse 1.7s ease-in-out infinite;
+}
+
+@keyframes hsFocusPulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}

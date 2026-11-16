@@ -43,8 +43,32 @@ npm start
 
 1. 选择一张题目截图（黑边圆点 + 数字的常见 Hashi 题面）。
 2. 工具按暗色连通块自动找出所有圆点岛，并拟合出行列网格。
-3. 点击岛后按 `1`-`8` 填写数字，`Backspace` 清除，方向键换岛；原始数字仍显示在图上方便核对。
+3. 圆内数字会用系统字体模板自动识别（1-8），高置信度的先自动填好；没读出/读错的点岛后按 `1`-`8` 补填，`Backspace` 清除，方向键换岛。原始数字仍显示在图上方便核对。
 4. 点「保存到题库并载入」直接写入题库。自定义题不强制唯一解，可以先保存任意题面，之后再编辑或求解。
+
+命令行同样可以识别并写入题库（与面板共用 `src/game/image-import.ts`）：
+
+```bash
+# 只识别、预览岛阵与数字（默认不写盘）
+npm run import-image -- QQ_1794679015274.png
+
+# 校验唯一解后写入 data/library.json
+npm run import-image -- QQ_1794679015274.png --name "识图导入 · 15×15" --verify --append
+
+# 人工修正数字：r3c5=4 表示第 3 行第 5 列的岛填 4（1 基）
+npm run import-image -- QQ_1794679015274.png --map r3c5=4,r3c12=1 --append
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--name 名称` / `--id ID` | 题库名称 / 指定 id（覆盖同 id 条目） |
+| `--append` | 写入 `data/library.json`；不加只预览 |
+| `--verify` | 唯一解校验（`--allow-multi` 可放宽，`--allow-none` 允许无解） |
+| `--map 修正` | `r3c5=4` 改第 3 行第 5 列数字（0 清空） |
+| `--min-conf N` | 自动填数字的最低置信度（默认 0.3） |
+| `--max-nodes N` / `--out FILE` / `--json` | 搜索节点上限 / 题库文件 / 机器可读输出 |
+
+数字识别依赖题图圆内是常见无衬线数字；字体太花或分辨率太低时用 `--map` 修正（预览会把低置信度候选列出来）。
 
 题面是稀疏的：没有数字的格子不参与绘制，棋盘留白按实际有岛的边界对齐。
 
@@ -132,5 +156,6 @@ npm run build     # tsc --noEmit + vite build
 npm run gen       # 重新生成题库
 npm run check     # 审计题库
 npm run verify    # 参考解、逻辑回放与交互验证
+npm run import-image  # 图片识别导入（预览 / --append / --verify / --map）
 npm run audit     # 逐题审计逻辑解题
 ```

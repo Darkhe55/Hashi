@@ -3,8 +3,9 @@
  *
  * 思路：题目图片里的岛是深色空心圆。把图片画到 canvas，取暗色像素的
  * 连通块，筛出近正方形、空心（填充率低）的连通块作为岛。再由岛心坐标
- * 拟合行列间距，得到每个岛的 (col, row)。数字由使用者点击岛后按 1-8
- * 填写；自定义题允许任意输入，保存时不强制唯一解。
+ * 拟合行列间距，得到每个岛的 (col, row)。
+ * 圆内的数字用系统字体模板做字形匹配自动读出（1-8），置信度低的留给
+ * 使用者手填/修正。自定义题允许任意输入，保存时不强制唯一解。
  */
 
 import type { ImageImportHost } from '../core/types'
@@ -16,10 +17,20 @@ interface Ring {
   r: number
 }
 
-interface Island extends Ring {
+/** 识别出的岛（含格坐标与自动读出的数字） */
+export interface Island extends Ring {
   col: number
   row: number
   value: number | null
+  /** 数字自动识别的置信度 0..1（null = 没读出数字） */
+  confidence?: number | null
+}
+
+/** 图片识别出的整块岛阵 */
+export interface IslandBoard {
+  width: number
+  height: number
+  islands: Island[]
 }
 
 interface Component {
@@ -139,22 +150,34 @@ function components(
   return { comps: out, labels }
 }
 
-function detectRings(canvas: HTMLCanvasElement, image: HTMLImageElement): Ring[] {
+interface CanvasPixels {
+  w: number
+  h: number
+  data: Uint8ClampedArray
+}
+
+function readCanvasPixels(
+  canvas: HTMLCanvasElement,
+  image: HTMLImageElement,
+): CanvasPixels | null {
   const sw = image.naturalWidth
   const sh = image.naturalHeight
-  if (!sw || !sh) return []
+  if (!sw || !sh) return null
   const scale = Math.min(1, 1500 / Math.max(sw, sh))
   const w = Math.max(1, Math.round(sw * scale))
   const h = Math.max(1, Math.round(sh * scale))
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) return []
+  if (!ctx) return null
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, w, h)
   ctx.drawImage(image, 0, 0, w, h)
+  return { w, h, data: ctx.getImageData(0, 0, w, h).data }
+}
 
-  const data = ctx.getImageData(0, 0, w, h).data
+function detectRings(pixels: CanvasPixels): Ring[] {
+  const { w, h, data } = pixels
   const mask = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) {
     const p = i * 4
@@ -200,6 +223,250 @@ function detectRings(canvas: HTMLCanvasElement, image: HTMLImageElement): Ring[]
   return merged
 }
 
+/** 由岛心坐标拟合行列并映射到整数格坐标，得到整块岛阵 */
+function buildIslandBoard(found: Ring[]): IslandBoard {
+  const radius = median(found.map((r) => r.r))
+  const xClusters = cluster(
+    found.map((r) => r.x),
+    radius * 0.45,
+  )
+  const yClusters = cluster(
+    found.map((r) => r.y),
+    radius * 0.45,
+  )
+  const lx = fitLattice(xClusters)
+  const ly = fitLattice(yClusters)
+
+  const raw = found.map((ring) => ({
+    ...ring,
+    col: lx.step > 0 ? Math.round((ring.x - lx.origin) / lx.step) : 0,
+    row: ly.step > 0 ? Math.round((ring.y - ly.origin) / ly.step) : 0,
+    value: null as number | null,
+  }))
+  const minCol = Math.min(...raw.map((r) => r.col))
+  const minRow = Math.min(...raw.map((r) => r.row))
+  const maxCol = Math.max(...raw.map((r) => r.col))
+  const maxRow = Math.max(...raw.map((r) => r.row))
+
+  const byCell = new Map<string, Island>()
+  for (const ring of raw) {
+    const col = ring.col - minCol
+    const row = ring.row - minRow
+    const key = `${col},${row}`
+    const prev = byCell.get(key)
+    if (!prev || ring.r > prev.r) {
+      byCell.set(key, { ...ring, col, row, value: null })
+    }
+  }
+  const islands = [...byCell.values()].sort((a, b) => a.row - b.row || a.col - b.col)
+  return { width: maxCol - minCol + 1, height: maxRow - minRow + 1, islands }
+}
+
+export interface DetectResult {
+  board: IslandBoard | null
+  error: string | null
+}
+
+/** 从图片识别岛阵；失败时 error 是可展示给用户的原因 */
+export function detectIslandBoard(
+  canvas: HTMLCanvasElement,
+  image: HTMLImageElement,
+): DetectResult {
+  const pixels = readCanvasPixels(canvas, image)
+  if (!pixels) return { board: null, error: '图片解码失败，请换一张 PNG/JPG 截图。' }
+  const found = detectRings(pixels)
+  if (!found.length) {
+    return {
+      board: null,
+      error: '没有识别到圆点岛。请换一张背景更干净、圆点更清晰的题目图片。',
+    }
+  }
+  return { board: buildIslandBoard(found), error: null }
+}
+
+// —— 圆内数字自动识别（系统字体模板匹配） ——
+
+const GW = 12
+const GH = 18
+const DIGIT_FONTS = [
+  'Arial',
+  'Verdana',
+  'Tahoma',
+  'Segoe UI',
+  'Calibri',
+  'Helvetica',
+  'DejaVu Sans',
+  'sans-serif',
+]
+
+interface DigitTemplate {
+  digit: number
+  grid: Float32Array
+  aspect: number
+}
+
+let digitTemplates: DigitTemplate[] | null = null
+
+function normalizeDensity(
+  data: Uint8ClampedArray,
+  imgW: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  threshold: number,
+): Float32Array {
+  const bw = maxX - minX + 1
+  const bh = maxY - minY + 1
+  const grid = new Float32Array(GW * GH)
+  for (let gy = 0; gy < GH; gy++) {
+    const y0 = minY + Math.floor((gy * bh) / GH)
+    const y1 = Math.max(y0, minY + Math.floor(((gy + 1) * bh) / GH) - 1)
+    for (let gx = 0; gx < GW; gx++) {
+      const x0 = minX + Math.floor((gx * bw) / GW)
+      const x1 = Math.max(x0, minX + Math.floor(((gx + 1) * bw) / GW) - 1)
+      let ink = 0
+      let total = 0
+      for (let y = y0; y <= y1; y++) {
+        const base = y * imgW
+        for (let x = x0; x <= x1; x++) {
+          total++
+          const p = (base + x) * 4
+          const lum =
+            0.299 * data[p]! + 0.587 * data[p + 1]! + 0.114 * data[p + 2]!
+          if (data[p + 3]! > 128 && lum < threshold) ink++
+        }
+      }
+      grid[gy * GW + gx] = total ? ink / total : 0
+    }
+  }
+  return grid
+}
+
+function buildDigitTemplates(): DigitTemplate[] {
+  const templates: DigitTemplate[] = []
+  const canvas = document.createElement('canvas')
+  canvas.width = 160
+  canvas.height = 160
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return templates
+  for (const font of DIGIT_FONTS) {
+    for (const weight of ['700', '400']) {
+      for (let digit = 1; digit <= 8; digit++) {
+        ctx.fillStyle = '#fff'
+        ctx.fillRect(0, 0, 160, 160)
+        ctx.fillStyle = '#000'
+        ctx.font = `${weight} 108px "${font}"`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(String(digit), 80, 84)
+        const data = ctx.getImageData(0, 0, 160, 160).data
+        let minX = 160
+        let minY = 160
+        let maxX = -1
+        let maxY = -1
+        for (let y = 0; y < 160; y++) {
+          for (let x = 0; x < 160; x++) {
+            const p = (y * 160 + x) * 4
+            const lum = 0.299 * data[p]! + 0.587 * data[p + 1]! + 0.114 * data[p + 2]!
+            if (lum >= 128) continue
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+          }
+        }
+        if (maxX < minX) continue
+        templates.push({
+          digit,
+          grid: normalizeDensity(data, 160, minX, minY, maxX, maxY, 128),
+          aspect: (maxX - minX + 1) / (maxY - minY + 1),
+        })
+      }
+    }
+  }
+  return templates
+}
+
+function gridDistance(a: Float32Array, b: Float32Array): number {
+  let sum = 0
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i]! - b[i]!
+    sum += d * d
+  }
+  return Math.sqrt(sum / a.length)
+}
+
+export interface DigitGuess {
+  value: number | null
+  confidence: number
+}
+
+/** 读每个岛圆内的数字；置信度低的 value 为 null（留给人工填写） */
+export function recognizeIslandDigits(
+  canvas: HTMLCanvasElement,
+  image: HTMLImageElement,
+  islands: Island[],
+): DigitGuess[] {
+  const pixels = readCanvasPixels(canvas, image)
+  const fallback = islands.map(() => ({ value: null, confidence: 0 }))
+  if (!pixels) return fallback
+  if (!digitTemplates) digitTemplates = buildDigitTemplates()
+  const templates = digitTemplates
+  if (!templates.length) return fallback
+  const { w, h, data } = pixels
+
+  return islands.map((island) => {
+    const cx = island.x
+    const cy = island.y
+    const r = island.r
+    const limit = r * 0.8
+    const x0 = Math.max(0, Math.floor(cx - limit))
+    const x1 = Math.min(w - 1, Math.ceil(cx + limit))
+    const y0 = Math.max(0, Math.floor(cy - limit))
+    const y1 = Math.min(h - 1, Math.ceil(cy + limit))
+    let minX = w
+    let minY = h
+    let maxX = -1
+    let maxY = -1
+    for (let y = y0; y <= y1; y++) {
+      const dy = y - cy
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx
+        if (dx * dx + dy * dy > limit * limit) continue
+        const p = (y * w + x) * 4
+        const lum = 0.299 * data[p]! + 0.587 * data[p + 1]! + 0.114 * data[p + 2]!
+        if (data[p + 3]! <= 128 || lum >= 150) continue
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    }
+    if (maxX < minX || maxY < minY) return { value: null, confidence: 0 }
+    const bw = maxX - minX + 1
+    const bh = maxY - minY + 1
+    // 数字应该落在圆心附近、大小与圆匹配；太小的噪点或贴边的圆环都丢掉
+    if (bw < r * 0.18 || bh < r * 0.3) return { value: null, confidence: 0 }
+    if (bw > r * 1.55 || bh > r * 1.75) return { value: null, confidence: 0 }
+
+    const grid = normalizeDensity(data, w, minX, minY, maxX, maxY, 150)
+    const aspect = bw / bh
+    let bestDigit: number | null = null
+    let bestScore = Number.POSITIVE_INFINITY
+    for (const tpl of templates) {
+      const score = gridDistance(grid, tpl.grid) + Math.abs(aspect - tpl.aspect) * 0.18
+      if (score < bestScore) {
+        bestScore = score
+        bestDigit = tpl.digit
+      }
+    }
+    const confidence = Math.max(0, Math.min(1, 1 - bestScore / 0.5))
+    return { value: bestDigit, confidence }
+  })
+}
+
+
 export function mountImageImport(root: HTMLElement, host: ImageImportHost): void {
   root.innerHTML = `
     <div class="import-head">
@@ -211,7 +478,8 @@ export function mountImageImport(root: HTMLElement, host: ImageImportHost): void
       <label class="import-name">名称 <input id="import-name" type="text" placeholder="自动命名" /></label>
     </div>
     <div class="import-hint">
-      选一张题目截图，工具会自动找出圆点岛。点击岛后按 <kbd>1</kbd>-<kbd>8</kbd> 填数字，
+      选一张题目截图，工具会自动找出圆点岛，并尝试读出圆内的数字（1-8）。
+      自动识别会先填高置信度的数字；没读出的点岛后按 <kbd>1</kbd>-<kbd>8</kbd> 补填，
       <kbd>Backspace</kbd> 清除，方向键换岛。原始数字仍显示在图上，方便核对。
     </div>
     <div class="import-stage" id="import-stage" hidden>
@@ -278,46 +546,33 @@ export function mountImageImport(root: HTMLElement, host: ImageImportHost): void
   }
 
   function detect(image: HTMLImageElement): void {
-    const found = detectRings(canvas, image)
+    const result = detectIslandBoard(canvas, image)
     sourceImage = image
     stage.hidden = false
-    if (!found.length) {
+    if (!result.board) {
       islands = []
-      info.textContent = '没有识别到圆点岛。请换一张背景更干净、圆点更清晰的题目图片。'
-      host.message('识别失败：没有找到圆形岛。', 'bad')
+      info.textContent = result.error ?? '识别失败'
+      host.message(`识别失败：${result.error ?? '没有找到圆形岛'}`, 'bad')
       return
     }
 
-    const radius = median(found.map((r) => r.r))
-    const xClusters = cluster(found.map((r) => r.x), radius * 0.45)
-    const yClusters = cluster(found.map((r) => r.y), radius * 0.45)
-    const lx = fitLattice(xClusters)
-    const ly = fitLattice(yClusters)
+    islands = result.board.islands.map((island) => ({ ...island }))
+    width = result.board.width
+    height = result.board.height
 
-    const raw = found.map((ring) => ({
-      ...ring,
-      col: lx.step > 0 ? Math.round((ring.x - lx.origin) / lx.step) : 0,
-      row: ly.step > 0 ? Math.round((ring.y - ly.origin) / ly.step) : 0,
-      value: null,
-    }))
-    const minCol = Math.min(...raw.map((r) => r.col))
-    const minRow = Math.min(...raw.map((r) => r.row))
-    const maxCol = Math.max(...raw.map((r) => r.col))
-    const maxRow = Math.max(...raw.map((r) => r.row))
-
-    const byCell = new Map<string, Island>()
-    for (const ring of raw) {
-      const col = ring.col - minCol
-      const row = ring.row - minRow
-      const key = `${col},${row}`
-      const prev = byCell.get(key)
-      if (!prev || ring.r > prev.r) {
-        byCell.set(key, { ...ring, col, row, value: null })
+    // 圆内数字自动识别：只自动填高置信度的，其余留给使用者点岛补填
+    const guesses = recognizeIslandDigits(canvas, image, islands)
+    let auto = 0
+    islands.forEach((island, i) => {
+      const guess = guesses[i]
+      if (!guess || guess.value == null) return
+      island.confidence = guess.confidence
+      if (guess.confidence >= 0.3) {
+        island.value = guess.value
+        auto++
       }
-    }
-    islands = [...byCell.values()].sort((a, b) => a.row - b.row || a.col - b.col)
-    width = maxCol - minCol + 1
-    height = maxRow - minRow + 1
+    })
+
     selected = 0
     puzzleId = `hashi-custom-image-${Date.now()}`
     if (!nameInput.value.trim()) {
@@ -327,7 +582,11 @@ export function mountImageImport(root: HTMLElement, host: ImageImportHost): void
     }
     stage.hidden = false
     render()
-    host.message(`识别完成：${islands.length} 个岛，${width}×${height}。`, 'ok')
+    host.message(
+      `识别完成：${islands.length} 个岛，${width}×${height}，自动读出 ${auto} 个数字` +
+        `（其余请点岛补填）。`,
+      'ok',
+    )
   }
 
   function setDigit(value: number | null): void {
@@ -459,3 +718,4 @@ export function mountImageImport(root: HTMLElement, host: ImageImportHost): void
 
   window.addEventListener('keydown', onKeyDown, true)
 }
+

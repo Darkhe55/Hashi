@@ -191,7 +191,7 @@ try {
       const canvas = document.createElement('canvas')
       const result = mod.detectIslandBoard(canvas, img)
       if (!result.board) return { ok: false, error: result.error }
-      const guesses = mod.recognizeIslandDigits(canvas, img, result.board.islands)
+      const guesses = mod.recognizeIslandDigits(canvas, img, result.board.islands, result.board.pixelWidth)
       return {
         ok: true,
         width: result.board.width,
@@ -220,6 +220,10 @@ try {
   if (width > MAX_CUSTOM_SIZE || height > MAX_CUSTOM_SIZE) {
     usage(`识别到 ${width}×${height}，超过最大尺寸 ${MAX_CUSTOM_SIZE}`)
   }
+  // 月度大盘（如 40×50、600 个岛）回溯求解基本跑不动；--append/--verify 时把
+  // 默认节点上限压小，超时只告警、题面照常入库（用户可用 --max-nodes 自行放宽）。
+  const maxNodes =
+    args.maxNodes === 500_000 && detected.islands.length > 200 ? 20_000 : args.maxNodes
 
   // 用置信度决定是否自动填数字
   const grid = new Array(width * height).fill(0)
@@ -236,6 +240,9 @@ try {
     report.push({
       row: island.row + 1,
       col: island.col + 1,
+      x: Number(island.x.toFixed(1)),
+      y: Number(island.y.toFixed(1)),
+      r: Number(island.r.toFixed(2)),
       value,
       guess: guess.value,
       confidence: Number(guess.confidence.toFixed(2)),
@@ -327,7 +334,7 @@ try {
         const out = solver.countSolutions(islands, edges, limit, maxNodes)
         return { count: out.count, nodes: out.nodes, timedOut: out.timedOut }
       },
-      { islands: grid, w: width, h: height, verify: args.verify, maxNodes: args.maxNodes },
+      { islands: grid, w: width, h: height, verify: args.verify, maxNodes },
     )
     console.log(
       `[import] 解题校验：count=${check.count} 节点=${check.nodes}${check.timedOut ? '（超时）' : ''}`,

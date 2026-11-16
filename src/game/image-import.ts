@@ -31,6 +31,9 @@ export interface IslandBoard {
   width: number
   height: number
   islands: Island[]
+  /** 检测画布的像素宽高（数字识别会用更高分辨率的画布，坐标需要按比例换算） */
+  pixelWidth?: number
+  pixelHeight?: number
 }
 
 interface Component {
@@ -39,11 +42,6 @@ interface Component {
   minY: number
   maxX: number
   maxY: number
-}
-
-interface Lattice {
-  origin: number
-  step: number
 }
 
 function median(values: number[]): number {
@@ -65,40 +63,6 @@ function cluster(values: number[], tol: number): number[] {
     else groups.push([value])
   }
   return groups.map((g) => g.reduce((a, b) => a + b, 0) / g.length)
-}
-
-/** 用最小二乘拟合 origin + k * step，容忍个别空行/空列 */
-function fitLattice(values: number[]): Lattice {
-  if (!values.length) return { origin: 0, step: 0 }
-  const origin = values[0]!
-  if (values.length === 1) return { origin, step: 0 }
-
-  let step = Infinity
-  for (let i = 1; i < values.length; i++) {
-    const diff = values[i]! - values[i - 1]!
-    if (diff > 0 && diff < step) step = diff
-  }
-  if (!(step > 0) || !isFinite(step)) return { origin, step: 0 }
-
-  let fittedOrigin = origin
-  for (let pass = 0; pass < 3; pass++) {
-    const ks = values.map((v) => Math.round((v - fittedOrigin) / step))
-    const kMean = ks.reduce((a, b) => a + b, 0) / ks.length
-    const vMean = values.reduce((a, b) => a + b, 0) / values.length
-    let num = 0
-    let den = 0
-    for (let i = 0; i < values.length; i++) {
-      const dk = ks[i]! - kMean
-      num += dk * (values[i]! - vMean)
-      den += dk * dk
-    }
-    if (!(den > 0)) break
-    const next = num / den
-    if (!(next > 0)) break
-    step = next
-    fittedOrigin = vMean - step * kMean
-  }
-  return { origin: fittedOrigin, step }
 }
 
 function components(
@@ -156,16 +120,32 @@ interface CanvasPixels {
   data: Uint8ClampedArray
 }
 
+/** 岛检测统一用的画布上限（像素量适中，保证连格拟合稳定） */
+const DETECT_MAX_DIM = 2600
+/**
+ * 数字识别用的画布上限。月度大盘每格只有 30 多像素，缩到 1500px 后圆内数字
+ * 只剩十来个像素，模板匹配掉分严重；放宽到 2600px 后按原图或更高清晰度识别，
+ * 小截图仍保持原尺寸（不会改变旧题的识别结果）。
+ */
+const DIGIT_MAX_DIM = 2600
+
+function scaledCanvasSize(sw: number, sh: number, maxDim: number): { w: number; h: number } {
+  const scale = Math.min(1, maxDim / Math.max(sw, sh))
+  return {
+    w: Math.max(1, Math.round(sw * scale)),
+    h: Math.max(1, Math.round(sh * scale)),
+  }
+}
+
 function readCanvasPixels(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement,
+  maxDim: number = DETECT_MAX_DIM,
 ): CanvasPixels | null {
   const sw = image.naturalWidth
   const sh = image.naturalHeight
   if (!sw || !sh) return null
-  const scale = Math.min(1, 1500 / Math.max(sw, sh))
-  const w = Math.max(1, Math.round(sw * scale))
-  const h = Math.max(1, Math.round(sh * scale))
+  const { w, h } = scaledCanvasSize(sw, sh, maxDim)
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
@@ -182,7 +162,7 @@ function detectRings(pixels: CanvasPixels): Ring[] {
   for (let i = 0; i < w * h; i++) {
     const p = i * 4
     const lum = 0.299 * data[p]! + 0.587 * data[p + 1]! + 0.114 * data[p + 2]!
-    mask[i] = data[p + 3]! > 128 && lum < 120 ? 1 : 0
+    mask[i] = data[p + 3]! > 128 && lum < 155 ? 1 : 0
   }
 
   const { comps, labels } = components(mask, w, h)
@@ -223,6 +203,18 @@ function detectRings(pixels: CanvasPixels): Ring[] {
   return merged
 }
 
+/** 由簇心序列估计格距：取相邻簇差里接近最小差值的那些的中位数（容忍空行/空列） */
+function latticeStep(centers: number[]): number {
+  if (centers.length < 2) return 0
+  const diffs: number[] = []
+  for (let i = 1; i < centers.length; i++) diffs.push(centers[i]! - centers[i - 1]!)
+  const positive = diffs.filter((d) => d > 0)
+  if (!positive.length) return 0
+  const minDiff = Math.min(...positive)
+  const single = positive.filter((d) => d < minDiff * 1.6)
+  return median(single.length ? single : positive)
+}
+
 /** 由岛心坐标拟合行列并映射到整数格坐标，得到整块岛阵 */
 function buildIslandBoard(found: Ring[]): IslandBoard {
   const radius = median(found.map((r) => r.r))
@@ -234,15 +226,37 @@ function buildIslandBoard(found: Ring[]): IslandBoard {
     found.map((r) => r.y),
     radius * 0.45,
   )
-  const lx = fitLattice(xClusters)
-  const ly = fitLattice(yClusters)
+  const stepX = latticeStep(xClusters)
+  const stepY = latticeStep(yClusters)
 
-  const raw = found.map((ring) => ({
-    ...ring,
-    col: lx.step > 0 ? Math.round((ring.x - lx.origin) / lx.step) : 0,
-    row: ly.step > 0 ? Math.round((ring.y - ly.origin) / ly.step) : 0,
-    value: null as number | null,
-  }))
+  // 先按最近的簇心定位，再用簇心坐标（而不是单个环的 bbox 中心）作为岛心：
+  // 圆环偶尔断成圆弧时 bbox 中心会偏，簇心中位数能把圆心纠回来。
+  const nearest = (centers: number[], value: number): number => {
+    let best = 0
+    let bestDist = Infinity
+    for (let i = 0; i < centers.length; i++) {
+      const dist = Math.abs(centers[i]! - value)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = i
+      }
+    }
+    return best
+  }
+  const raw = found.map((ring) => {
+    const xi = nearest(xClusters, ring.x)
+    const yi = nearest(yClusters, ring.y)
+    const clusterX = xClusters[xi]!
+    const clusterY = yClusters[yi]!
+    return {
+      ...ring,
+      x: clusterX,
+      y: clusterY,
+      col: stepX > 0 ? Math.round((clusterX - xClusters[0]!) / stepX) : xi,
+      row: stepY > 0 ? Math.round((clusterY - yClusters[0]!) / stepY) : yi,
+      value: null as number | null,
+    }
+  })
   const minCol = Math.min(...raw.map((r) => r.col))
   const minRow = Math.min(...raw.map((r) => r.row))
   const maxCol = Math.max(...raw.map((r) => r.col))
@@ -259,6 +273,13 @@ function buildIslandBoard(found: Ring[]): IslandBoard {
     }
   }
   const islands = [...byCell.values()].sort((a, b) => a.row - b.row || a.col - b.col)
+  // 圆环像素太细时偶尔会断成圆弧，导致个别岛半径偏小；半径收敛到整体中位数附近。
+  const medianRadius = median(islands.map((island) => island.r)) || radius
+  for (const island of islands) {
+    if (island.r < medianRadius * 0.7 || island.r > medianRadius * 1.4) {
+      island.r = medianRadius
+    }
+  }
   return { width: maxCol - minCol + 1, height: maxRow - minRow + 1, islands }
 }
 
@@ -272,7 +293,7 @@ export function detectIslandBoard(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement,
 ): DetectResult {
-  const pixels = readCanvasPixels(canvas, image)
+  const pixels = readCanvasPixels(canvas, image, DETECT_MAX_DIM)
   if (!pixels) return { board: null, error: '图片解码失败，请换一张 PNG/JPG 截图。' }
   const found = detectRings(pixels)
   if (!found.length) {
@@ -281,7 +302,10 @@ export function detectIslandBoard(
       error: '没有识别到圆点岛。请换一张背景更干净、圆点更清晰的题目图片。',
     }
   }
-  return { board: buildIslandBoard(found), error: null }
+  const board = buildIslandBoard(found)
+  board.pixelWidth = pixels.w
+  board.pixelHeight = pixels.h
+  return { board, error: null }
 }
 
 // —— 圆内数字自动识别（系统字体模板匹配） ——
@@ -407,19 +431,23 @@ export function recognizeIslandDigits(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement,
   islands: Island[],
+  detectPixelWidth?: number,
 ): DigitGuess[] {
-  const pixels = readCanvasPixels(canvas, image)
+  const pixels = readCanvasPixels(canvas, image, DIGIT_MAX_DIM)
   const fallback = islands.map(() => ({ value: null, confidence: 0 }))
   if (!pixels) return fallback
   if (!digitTemplates) digitTemplates = buildDigitTemplates()
   const templates = digitTemplates
   if (!templates.length) return fallback
   const { w, h, data } = pixels
+  // 检测画布更小：数字识别画布上的岛心/半径要按比例放大。
+  const detW = detectPixelWidth && detectPixelWidth > 0 ? detectPixelWidth : w
+  const ratio = w / detW
 
   return islands.map((island) => {
-    const cx = island.x
-    const cy = island.y
-    const r = island.r
+    const cx = island.x * ratio
+    const cy = island.y * ratio
+    const r = island.r * ratio
     const limit = r * 0.8
     const x0 = Math.max(0, Math.floor(cx - limit))
     const x1 = Math.min(w - 1, Math.ceil(cx + limit))
@@ -561,7 +589,7 @@ export function mountImageImport(root: HTMLElement, host: ImageImportHost): void
     height = result.board.height
 
     // 圆内数字自动识别：只自动填高置信度的，其余留给使用者点岛补填
-    const guesses = recognizeIslandDigits(canvas, image, islands)
+    const guesses = recognizeIslandDigits(canvas, image, islands, result.board.pixelWidth)
     let auto = 0
     islands.forEach((island, i) => {
       const guess = guesses[i]

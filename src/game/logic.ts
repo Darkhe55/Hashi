@@ -20,9 +20,19 @@ const MAX_INFER_FRAMES = 160
 function ruleFor(value: number, reason: LogicReason): number {
   if (reason === 'crossing') return 3
   if (reason === 'connectivity') return 4
+  if (reason === 'group') return 6
   if (reason === 'search') return 8
   if (reason === 'complete') return 9
   return value > 0 ? 1 : 2
+}
+
+function groupLabel(value: number, detail?: SetDetail): string {
+  const size = detail?.groupSize ?? 0
+  const clueSum = detail?.groupClueSum ?? 0
+  if (detail?.side === 'inside') {
+    return `岛群割约束：${size} 个岛共需 ${clueSum} 座桥，群内必须占 ${detail?.inLo ?? 0}–${detail?.inHi ?? 0} 座 → 这条只能 ${value} 座`
+  }
+  return `岛群割约束：${size} 个岛共需 ${clueSum} 座桥，至少 ${detail?.crossLo ?? 0} 座桥必须出群（至多 ${detail?.crossHi ?? 0} 座）→ 这条只能 ${value} 座`
 }
 
 function labelFor(value: number, reason: LogicReason, detail?: SetDetail): string {
@@ -30,6 +40,7 @@ function labelFor(value: number, reason: LogicReason, detail?: SetDetail): strin
   if (reason === 'connectivity') {
     return value > 0 ? '连通必经：不架桥会把岛群断开，这条线必须架桥' : '连通必经：这条线不能架桥'
   }
+  if (reason === 'group') return groupLabel(value, detail)
   if (reason === 'search') return '回溯试探：该桥最终数量'
   if (reason === 'complete') return '补全：该桥最终数量'
   if (detail?.kind === 'max') {
@@ -53,6 +64,7 @@ function inferLabel(min: number, max: number, reason: LogicReason, note: string)
   const suffix = note ? `（${note}）` : ''
   if (reason === 'crossing') return `域收窄：这条边不能架桥${suffix}`
   if (reason === 'connectivity') return `域收窄：这条边必须架桥${suffix}`
+  if (reason === 'group') return `岛群割约束：这条边只能取 ${min}–${max} 座${suffix}`
   if (max === 0) return `域排除：这条边不能架桥${suffix}`
   if (min >= 1 && max === 2) return `域收窄：这条边至少 ${min} 座${suffix}`
   if (min === 0 && max === 1) return `域收窄：这条边至多 ${max} 座${suffix}`
@@ -102,7 +114,7 @@ export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPl
     streak++
     const note = detail?.cands?.find((c) => c.edge === edge)?.note ?? ''
     frames.push({
-      rule: reason === 'crossing' ? 3 : reason === 'connectivity' ? 4 : 5,
+      rule: reason === 'crossing' ? 3 : reason === 'connectivity' ? 4 : reason === 'group' ? 6 : 5,
       kind: 'infer',
       label: inferLabel(min, max, reason, note),
       streak,

@@ -5,11 +5,21 @@
 import { incidentEdges, type BridgeEdge } from './types.ts'
 import type { FrameEdgeHint } from '../core/types'
 
-export type SetReason = 'bounds' | 'crossing' | 'connectivity'
+export type SetReason = 'bounds' | 'crossing' | 'connectivity' | 'group'
 
 /** 回放用的推理细节：让「上下界」步骤能说清为什么这条边必须是这个值 */
 export interface SetDetail {
-  kind: 'min' | 'max' | 'range' | 'crossing' | 'connectivity' | 'final'
+  kind: 'min' | 'max' | 'range' | 'crossing' | 'connectivity' | 'group' | 'final'
+  /** group：这条边是岛群对外的割边（出群）还是群内边 */
+  side?: 'cut' | 'inside'
+  /** group：岛群的岛数、线索之和 */
+  groupSize?: number
+  groupClueSum?: number
+  /** group：出群桥数 / 群内桥数的可行区间 */
+  crossLo?: number
+  crossHi?: number
+  inLo?: number
+  inHi?: number
   /** 触发这条推理的岛（格子下标）与它的数字 */
   island?: number
   clue?: number
@@ -41,6 +51,109 @@ const isSingleton = (mask: number): boolean => mask === 1 || mask === 2 || mask 
 const onlyValue = (mask: number): number => (mask === 1 ? 0 : mask === 2 ? 1 : 2)
 const minValue = (mask: number): number => (mask & 1 ? 0 : mask & 2 ? 1 : 2)
 const maxValue = (mask: number): number => (mask & 4 ? 2 : mask & 2 ? 1 : 0)
+/** 取值域里同时有奇数和偶数（求和的奇偶性可以自由调整） */
+const parityFree = (mask: number): boolean =>
+  (mask & 2) !== 0 || ((mask & 1) !== 0 && (mask & 4) !== 0)
+
+/**
+ * 岛群割约束用到的「岛群」：一组连通岛（只算候选边连起来的岛）。
+ * 对任意真子集 S 都有 clueSum(S) = 2·群内桥数 + 出群桥数，且出群桥数 ≥ 1（否则 S 会被孤立）。
+ */
+interface IslandGroup {
+  /** 岛群包含的岛（格子下标） */
+  islands: number[]
+  /** 岛群线索之和 */
+  clueSum: number
+  /** 两端都在群内的候选边 */
+  inside: number[]
+  /** 一端在群内、一端在群外的候选边 */
+  outside: number[]
+}
+
+/** 岛群枚举规模上限：岛越多，只枚举越小的岛群（保证大棋盘不会枚举爆炸） */
+function groupLimits(islandCount: number): { maxSize: number; budget: number } {
+  if (islandCount <= 20) return { maxSize: islandCount - 1, budget: 20_000 }
+  if (islandCount <= 36) return { maxSize: 8, budget: 12_000 }
+  if (islandCount <= 72) return { maxSize: 5, budget: 12_000 }
+  if (islandCount <= 160) return { maxSize: 3, budget: 12_000 }
+  return { maxSize: 2, budget: 12_000 }
+}
+
+const groupCache = new WeakMap<BridgeEdge[], IslandGroup[]>()
+
+/** 枚举「候选图里连通」的岛群（大小 2 起）；同一个 edges 数组只算一次 */
+function islandGroups(islands: ArrayLike<number>, edges: BridgeEdge[]): IslandGroup[] {
+  const cached = groupCache.get(edges)
+  if (cached) return cached
+
+  const active: number[] = []
+  for (let i = 0; i < islands.length; i++) if ((islands[i] ?? 0) > 0) active.push(i)
+  const n = active.length
+  const out: IslandGroup[] = []
+  if (n < 2) {
+    groupCache.set(edges, out)
+    return out
+  }
+
+  const local = new Map<number, number>()
+  for (let k = 0; k < n; k++) local.set(active[k]!, k)
+  const adj: number[][] = Array.from({ length: n }, () => [])
+  const edgeA = new Int32Array(edges.length)
+  const edgeB = new Int32Array(edges.length)
+  for (let e = 0; e < edges.length; e++) {
+    const a = local.get(edges[e]!.a)!
+    const b = local.get(edges[e]!.b)!
+    edgeA[e] = a
+    edgeB[e] = b
+    adj[a]!.push(b)
+    adj[b]!.push(a)
+  }
+
+  const { maxSize, budget } = groupLimits(n)
+  // 按岛群大小逐层扩展，用有序下标串去重
+  let layer: number[][] = []
+  for (let s = 0; s < n; s++) layer.push([s])
+  let size = 1
+  while (layer.length && size < maxSize && out.length < budget) {
+    const nextLayer: number[][] = []
+    const seen = new Set<string>()
+    for (const group of layer) {
+      const inGroup = new Set(group)
+      const frontier = new Set<number>()
+      for (const v of group) for (const w of adj[v]!) if (!inGroup.has(w)) frontier.add(w)
+      for (const v of frontier) {
+        const next = group.concat(v).sort((x, y) => x - y)
+        const key = next.join(',')
+        if (seen.has(key)) continue
+        seen.add(key)
+        nextLayer.push(next)
+        if (nextLayer.length >= budget) break
+      }
+      if (nextLayer.length >= budget) break
+    }
+    size++
+    for (const group of nextLayer) {
+      if (out.length >= budget) break
+      const set = new Set(group)
+      const inside: number[] = []
+      const outside: number[] = []
+      for (let e = 0; e < edges.length; e++) {
+        const ia = set.has(edgeA[e]!)
+        const ib = set.has(edgeB[e]!)
+        if (ia && ib) inside.push(e)
+        else if (ia || ib) outside.push(e)
+      }
+      if (!inside.length || !outside.length) continue
+      let clueSum = 0
+      for (const idx of group) clueSum += islands[active[idx]!] ?? 0
+      out.push({ islands: group.map((idx) => active[idx]!), clueSum, inside, outside })
+    }
+    layer = nextLayer
+  }
+
+  groupCache.set(edges, out)
+  return out
+}
 
 /**
  * 确定性传播。
@@ -48,7 +161,9 @@ const maxValue = (mask: number): number => (mask & 4 ? 2 : mask & 2 ? 1 : 0)
  * 每条候选桥维护 {0,1,2} 的取值域，反复做：
  * 1. 单岛度数上下界 / 唯一剩余边；
  * 2. 交叉封锁：必须为正的桥会封死所有与它交叉的边；
- * 3. 连通必经：候选图里的桥边必须为正。
+ * 3. 连通必经：候选图里的桥边必须为正；
+ * 4. 岛群割约束：一组岛（真子集）的出群桥数 = 线索和 - 2·群内桥数，至少 1 座，
+ *    再结合群内 / 出群边的取值上下界和奇偶性收窄每条边。
  */
 export function propagate(
   bridges: number[],
@@ -120,6 +235,110 @@ export function propagate(
     max: maxValue(dom[e]!),
     note: capNote[e] ?? floorNote[e] ?? '',
   })
+
+  const groups = islandGroups(islands, edges)
+  const wantDetail = Boolean(onSet || onNarrow)
+
+  /**
+   * 岛群割约束（只在便宜规则推不动时跑一遍）。
+   *
+   * 对岛群 S：clueSum(S) = 2·群内桥数 + 出群桥数。
+   * - 出群桥数 ≥ 1：S 是真子集，最终解必须连成一个整体，S 至少有一条桥连出去；
+   * - 出群桥数 ≡ clueSum(S)（mod 2）：群内桥数每条贡献 2，不改变奇偶；
+   * - 群内 / 出群桥数各自不超过候选边取值上限，于是两侧都能压出区间。
+   * 再按「这条边取 v 后，其它边还能不能凑出合法区间和奇偶」逐边收窄。
+   */
+  const runGroupRules = (): boolean => {
+    for (const group of groups) {
+      let outMin = 0
+      let outMax = 0
+      let outFree = false
+      let outOdd = 0
+      for (const e of group.outside) {
+        const m = dom[e]!
+        outMin += minValue(m)
+        outMax += maxValue(m)
+        if (parityFree(m)) outFree = true
+        else if (m === 2) outOdd++
+      }
+      let inMin = 0
+      let inMax = 0
+      for (const e of group.inside) {
+        const m = dom[e]!
+        inMin += minValue(m)
+        inMax += maxValue(m)
+      }
+      const crossLo = Math.max(outMin, group.clueSum - 2 * inMax, 1)
+      const crossHi = Math.min(outMax, group.clueSum - 2 * inMin)
+      if (crossLo > crossHi) return false
+      if (!outFree && (outOdd & 1) !== (group.clueSum & 1)) return false
+      const inLo = Math.max(inMin, Math.ceil((group.clueSum - crossHi) / 2))
+      const inHi = Math.min(inMax, Math.floor((group.clueSum - crossLo) / 2))
+      if (inLo > inHi) return false
+
+      const detailFor = (side: 'cut' | 'inside'): SetDetail => {
+        const detail: SetDetail = {
+          kind: 'group',
+          side,
+          island: group.islands[0],
+          groupSize: group.islands.length,
+          groupClueSum: group.clueSum,
+          crossLo,
+          crossHi,
+          inLo,
+          inHi,
+        }
+        if (wantDetail) {
+          const cands: FrameEdgeHint[] = []
+          for (const e of group.inside) cands.push(edgeHint(e))
+          for (const e of group.outside) cands.push(edgeHint(e))
+          detail.cands = cands
+        }
+        return detail
+      }
+
+      for (const e of group.outside) {
+        const d = dom[e]!
+        const oMin = outMin - minValue(d)
+        const oMax = outMax - maxValue(d)
+        let oFree = false
+        let oOdd = 0
+        for (const f of group.outside) {
+          if (f === e) continue
+          const m = dom[f]!
+          if (parityFree(m)) oFree = true
+          else if (m === 2) oOdd++
+        }
+        let keep = 0
+        for (let v = 0; v <= 2; v++) {
+          if ((d & (1 << v)) === 0) continue
+          const lo = Math.max(oMin, crossLo - v)
+          const hi = Math.min(oMax, crossHi - v)
+          if (lo > hi) continue
+          if (!oFree && (oOdd & 1) !== ((group.clueSum - v) & 1)) continue
+          keep |= 1 << v
+        }
+        if (keep === 0) return false
+        if (keep !== d && !narrow(e, keep, 'group', detailFor('cut'))) return false
+      }
+
+      for (const e of group.inside) {
+        const d = dom[e]!
+        const oMin = inMin - minValue(d)
+        const oMax = inMax - maxValue(d)
+        let keep = 0
+        for (let v = 0; v <= 2; v++) {
+          if ((d & (1 << v)) === 0) continue
+          const lo = Math.max(oMin, inLo - v)
+          const hi = Math.min(oMax, inHi - v)
+          if (lo <= hi) keep |= 1 << v
+        }
+        if (keep === 0) return false
+        if (keep !== d && !narrow(e, keep, 'group', detailFor('inside'))) return false
+      }
+    }
+    return true
+  }
 
   while (changed) {
     changed = false
@@ -270,6 +489,11 @@ export function propagate(
     if (components > 1) return false
     for (const e of cutEdges) {
       if (!narrow(e, 6, 'connectivity', { kind: 'connectivity' })) return false
+    }
+
+    // 4) 岛群割约束：前面几条都推不动时，按岛群再压一轮取值域
+    if (!changed && groups.length) {
+      if (!runGroupRules()) return false
     }
   }
 

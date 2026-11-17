@@ -9,6 +9,7 @@ import {
   asHashiPuzzle,
   asHashiState,
   buildEdges,
+  type HashiPuzzle,
   type HashiState,
 } from './types'
 
@@ -71,14 +72,31 @@ function inferLabel(min: number, max: number, reason: LogicReason, note: string)
   return `域收窄：这条边只能取 ${min}–${max} 座${suffix}`
 }
 
-export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPlan {
-  const p = asHashiPuzzle(puzzle)
-  const s = asHashiState(initialState)
+/** 当前盘面里是否有玩家已经架好的桥（1/2 座；0 与「未知」在状态里不可区分） */
+function hasPlayerBridges(s: HashiState): boolean {
+  for (let e = 0; e < s.bridges.length; e++) if ((s.bridges[e] ?? 0) > 0) return true
+  return false
+}
+
+/** 一次完整尝试；失败返回 null，便于「种子矛盾 → 退回只看题面」重试 */
+function attempt(p: HashiPuzzle, s: HashiState, seedPlayer: boolean): LogicPlan | null {
   const islands = p.islands ?? []
   const edges = buildEdges(islands, p.width, p.height)
   const total = edges.length
   const frames: PlaybackFrame[] = []
+  /**
+   * 工作盘面：-1 = 未知。回放从当前盘面开始 —— 玩家已经架好的桥（1/2 座）
+   * 直接写进工作数组作为已知值，未知边保持 -1。
+   */
   const grid = new Array<number>(total).fill(-1)
+  if (seedPlayer) {
+    for (let e = 0; e < total; e++) {
+      const cur = s.bridges[e] ?? 0
+      if (cur > 0) grid[e] = cur
+    }
+  }
+  /** 逐帧维护的「当前盘面」，保证每帧的 from 都是回放当时的值 */
+  const display = s.bridges.slice()
   const touched = new Array<boolean>(total).fill(false)
   let streak = 0
   let inferCount = 0
@@ -86,9 +104,10 @@ export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPl
   const onSet = (index: number, value: number, reason: LogicReason, detail?: SetDetail): void => {
     touched[index] = true
     if (grid[index] === value) return
-    const from = s.bridges[index] ?? 0
+    const from = display[index] ?? 0
     grid[index] = value
     if (from === value) return
+    display[index] = value
     streak++
     const move: Move = { index, from, to: value }
     frames.push({
@@ -132,16 +151,14 @@ export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPl
       onInfer,
     )
   ) {
-    return { puzzleId: p.id, frames: [], finalState: null, ruleSteps: 0, saturated: false }
+    return null
   }
 
   let saturated = true
   if (grid.some((v) => v === -1)) {
     saturated = false
     const solution = findSolution(islands, edges, 2_000_000)
-    if (!solution) {
-      return { puzzleId: p.id, frames: [], finalState: null, ruleSteps: 0, saturated: false }
-    }
+    if (!solution) return null
     for (let e = 0; e < total; e++) {
       if (grid[e] !== -1) continue
       onSet(e, solution[e]!, 'search')
@@ -149,12 +166,10 @@ export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPl
   }
 
   const bridges = grid.map((v) => (v > 0 ? v : 0))
-  if (!checkSolution(bridges, islands, edges).ok) {
-    return { puzzleId: p.id, frames: [], finalState: null, ruleSteps: 0, saturated: false }
-  }
+  if (!checkSolution(bridges, islands, edges).ok) return null
   for (let e = 0; e < total; e++) {
     if (touched[e]) continue
-    const from = s.bridges[e] ?? 0
+    const from = display[e] ?? 0
     if (bridges[e] === from) continue
     streak++
     frames.push({
@@ -172,4 +187,25 @@ export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPl
     bridges,
   }
   return { puzzleId: p.id, frames, finalState, ruleSteps: frames.length, saturated }
+}
+
+export function planLogicSolve(puzzle: Puzzle, initialState: GameState): LogicPlan {
+  const p = asHashiPuzzle(puzzle)
+  const s = asHashiState(initialState)
+  const emptyPlan: LogicPlan = {
+    puzzleId: p.id,
+    frames: [],
+    finalState: null,
+    ruleSteps: 0,
+    saturated: false,
+  }
+
+  const seeded = attempt(p, s, true)
+  if (seeded) return seeded
+  // 玩家标记与规则矛盾时，退回只看题面的旧路径（回放仍从当前桥数出发纠正）
+  if (hasPlayerBridges(s)) {
+    const plain = attempt(p, s, false)
+    if (plain) return plain
+  }
+  return emptyPlan
 }

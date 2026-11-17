@@ -39,8 +39,10 @@ export function cycleValue(state: GameState, target: HitTarget): number {
   return v >= 2 ? 0 : v + 1
 }
 
-export function rightClickValue(): number {
-  return 0
+export function rightClickValue(state: GameState, target: HitTarget): number {
+  const s = asHashiState(state)
+  const v = s.bridges[target.index] ?? 0
+  return v <= 0 ? 2 : v - 1
 }
 
 export function applyMove(state: GameState, move: Move): void {

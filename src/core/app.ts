@@ -655,7 +655,16 @@ export function createApp(root: HTMLElement, adapter: GameAdapter) {
     samePuzzle: (id) => session?.puzzle.id === id,
     currentPuzzle: () => session?.puzzle ?? null,
     setButtonsDisabled,
-    onFrame: (frame) => {
+    restoreState: (base, moves) => {
+      if (!session) return
+      session.state = adapter.cloneState(base)
+      session.undo = []
+      session.redo = []
+      for (const move of moves) adapter.applyMove(session.state, move)
+      saveState()
+      renderBoardOnly()
+    },
+    onStateChange: () => updateLogicButton(),    onFrame: (frame) => {
       adapter.onReplayFrame?.(frame)
     },
     onFinished: (_saturated, frames) => {
